@@ -1,0 +1,111 @@
+# Workflow réutilisable : Gitleaks sur les commits poussés ou proposés.
+# Appelé par le fichier .github/workflows/gitleaks.yml de chaque dépôt (voir modele/).
+#
+# - push / pull_request : seulement les nouveaux commits (bloque une nouvelle fuite) ;
+# - historique-complet  : tout l'historique (analyse hebdomadaire, lancement manuel).
+#
+# Binaire Gitleaks (licence MIT) téléchargé depuis les releases officielles et vérifié par
+# sha256 : pas de gitleaks-action, qui exige une licence pour les dépôts d'organisation.
+# Les secrets ne sont jamais affichés (--redact). .gitleaks.toml / .gitleaksignore du dépôt
+# appelant sont pris en compte.
+name: Gitleaks (réutilisable)
+
+on:
+  workflow_call:
+    inputs:
+      historique-complet:
+        description: Analyser tout l'historique au lieu des seuls nouveaux commits
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+env:
+  GITLEAKS_VERSION: "8.30.1"
+  GITLEAKS_SHA256: 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
+
+jobs:
+  gitleaks:
+    name: Recherche de secrets
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Récupérer le dépôt (historique complet)
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Installer Gitleaks ${{ env.GITLEAKS_VERSION }}
+        run: |
+          set -euo pipefail
+          archive="gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          curl -fsSL -o "${RUNNER_TEMP}/${archive}" \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/${archive}"
+          echo "${GITLEAKS_SHA256}  ${RUNNER_TEMP}/${archive}" | sha256sum -c -
+          tar -xzf "${RUNNER_TEMP}/${archive}" -C "${RUNNER_TEMP}" gitleaks
+          "${RUNNER_TEMP}/gitleaks" version
+
+      - name: Déterminer les commits à analyser
+        id: plage
+        env:
+          EVENEMENT: ${{ github.event_name }}
+          COMPLET: ${{ inputs.historique-complet }}
+          AVANT: ${{ github.event.before }}
+          APRES: ${{ github.sha }}
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PR_TETE: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          zero="0000000000000000000000000000000000000000"
+          if [[ "${COMPLET}" == "true" ]]; then
+            plage="--all"
+            libelle="tout l'historique"
+          elif [[ "${EVENEMENT}" == "pull_request" && -n "${PR_BASE}" ]]; then
+            plage="${PR_BASE}..${PR_TETE}"
+            libelle="commits de la pull request"
+          elif [[ "${EVENEMENT}" == "push" && -n "${AVANT}" && "${AVANT}" != "${zero}" ]] \
+            && git cat-file -e "${AVANT}^{commit}" 2>/dev/null; then
+            plage="${AVANT}..${APRES}"
+            libelle="commits poussés"
+          else
+            # Nouvelle branche, push forcé ou premier push : tout ce qui mène au commit.
+            plage="${APRES}"
+            libelle="historique de la branche"
+          fi
+          {
+            echo "plage=${plage}"
+            echo "libelle=${libelle}"
+          } >> "${GITHUB_OUTPUT}"
+
+      - name: Analyser (${{ steps.plage.outputs.libelle }})
+        env:
+          PLAGE: ${{ steps.plage.outputs.plage }}
+          LIBELLE: ${{ steps.plage.outputs.libelle }}
+        run: |
+          set -uo pipefail
+          rapport="${RUNNER_TEMP}/gitleaks.json"
+          "${RUNNER_TEMP}/gitleaks" git . --log-opts="${PLAGE}" --redact --no-banner \
+            --report-format json --report-path "${rapport}" --exit-code 2
+          code=$?
+          nombre=$(jq 'length' "${rapport}" 2>/dev/null || echo 0)
+          {
+            echo "## 🔐 Gitleaks — ${LIBELLE}"
+            echo
+            if [[ "${code}" -eq 0 ]]; then
+              echo "✅ Aucun secret détecté."
+            elif [[ "${code}" -eq 2 ]]; then
+              echo "⛔ **${nombre} secret(s) potentiel(s)** (valeurs masquées) :"
+              echo
+              echo "| Fichier | Ligne | Règle | Commit | Empreinte (.gitleaksignore) |"
+              echo "|---|---|---|---|---|"
+              jq -r '.[] | "| `\(.File)` | \(.StartLine) | \(.RuleID) | `\(.Commit[0:7])` | `\(.Fingerprint)` |"' "${rapport}"
+              echo
+              echo "**À faire :** retirer le secret, le **régénérer** s'il a été poussé, ou — faux"
+              echo "positif avéré uniquement — ajouter son empreinte à \`.gitleaksignore\`."
+            else
+              echo "⚠️ Gitleaks a échoué (code ${code})."
+            fi
+          } >> "${GITHUB_STEP_SUMMARY}"
+          exit "${code}"
