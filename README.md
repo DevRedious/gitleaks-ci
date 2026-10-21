@@ -11,7 +11,7 @@ qui appelle `.github/workflows/gitleaks.yml@v1` de ce dépôt :
 
 | Événement | Ce qui est analysé | Effet |
 |---|---|---|
-| `push` | les commits poussés | le run échoue si un secret est trouvé |
+| `push` | rien (job sauté, 0 minute) | le hook pre-commit local fait ce contrôle avant chaque commit |
 | `pull_request` | les commits de la PR | la PR affiche un échec |
 | chaque lundi, ou lancement manuel | **tout l'historique** | détecte les fuites anciennes |
 

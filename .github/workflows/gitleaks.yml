@@ -1,7 +1,8 @@
 # Workflow réutilisable : Gitleaks sur les commits poussés ou proposés.
 # Appelé par le fichier .github/workflows/gitleaks.yml de chaque dépôt (voir modele/).
 #
-# - push / pull_request : seulement les nouveaux commits (bloque une nouvelle fuite) ;
+# - pull_request        : seulement les commits de la PR (bloque une nouvelle fuite) ;
+# - push                : rien sur GitHub, le job est sauté (voir plus bas) ;
 # - historique-complet  : tout l'historique (analyse hebdomadaire, lancement manuel).
 #
 # Binaire Gitleaks (licence MIT) téléchargé depuis les releases officielles et vérifié par
@@ -28,6 +29,12 @@ env:
 jobs:
   gitleaks:
     name: Recherche de secrets
+    # Pas d'analyse à chaque push : GitHub facture chaque job à la minute entière, et ce job de
+    # quelques secondes coûtait une minute par push dans chaque dépôt privé (près d'un quart du
+    # quota Actions en octobre 2026). Les dépôts actifs lancent Gitleaks en local avant chaque
+    # commit (hook pre-commit) ; GitHub garde les PR et l'historique complet chaque lundi. Un
+    # job sauté ne consomme aucune minute.
+    if: github.event_name != 'push'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
